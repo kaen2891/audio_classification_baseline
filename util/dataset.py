@@ -1,27 +1,29 @@
+# -*- coding: cp949 -*-
 #from curses import meta
 import os
 import pickle
 import random
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
 from glob import glob
 
 import torch
 from torch.utils.data import Dataset
 import torchaudio
-
+torchaudio.set_audio_backend("soundfile") 
 
 class DepressedDataset(Dataset):
     def __init__(self, train_flag, transform, args, print_flag=True):
         
         print('train_flag', train_flag)
         
+        self.processor = args.processor
+        
         if train_flag:
             annotation_file = os.path.join(args.data_folder, args.train_annotation_file)
         else:
             annotation_file = os.path.join(args.data_folder, args.test_annotation_file)
-        
+        print('annotation', annotation_file)
         
         self.train_flag = train_flag
         self.args = args
@@ -29,8 +31,7 @@ class DepressedDataset(Dataset):
         # parameters for spectrograms
         self.sample_rate = args.sample_rate
 
-        """ get dataset information """        
-        annotation_file = pd.read_csv(annotation_file)        
+        """ get dataset information """
         self.data_inputs = self.get_audio(annotation_file)
     
     def get_audio(self, annotation_file):
@@ -43,11 +44,17 @@ class DepressedDataset(Dataset):
 
     def __getitem__(self, index):
         audio, labels = self.data_inputs[index]
+        labels = int(labels)
+        #print('audio', audio)
+        #print('labels', labels)
+        #print('file', os.path.join(self.args.data_folder, audio), os.path.isfile(os.path.join(self.args.data_folder, audio)))
+        #print('file2', os.path.exists(os.path.join(self.args.data_folder, audio)))
         waveform, sample_rate = torchaudio.load(os.path.join(self.args.data_folder, audio))
+        #print('sample_rate', sample_rate)
         waveform = torchaudio.functional.resample(waveform, orig_freq=sample_rate, new_freq=self.sample_rate)
         input_features = self.processor(waveform.squeeze(0), return_tensors="pt", sampling_rate=self.sample_rate).input_features.squeeze(0)
 
-        return input_features, labels
+        return input_features, int(labels)
 
 
     def __len__(self):
