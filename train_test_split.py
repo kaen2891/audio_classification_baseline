@@ -1,9 +1,10 @@
+# -*- coding: cp949 -*-
 import pandas as pd
 import os
 from sklearn.model_selection import train_test_split
 
 
-annotation = 'E:\wonkwang\Data\자살문단_20250422.csv'
+annotation = '/data2/wkuData/자살문단_20250422.csv'
 
 df = pd.read_csv(annotation)
 # PHQ9_B 없는 값 제거
@@ -12,24 +13,27 @@ df = df.dropna(subset=['PHQ9_B'])
 # annotation 과 음성 파일 mapping 작업
 files = df['연구번호'].values.tolist()
 
-data_dir = 'E:\wonkwang\Data\가을문단all'
+#data_dir = 'E:\wonkwang\Data\가을문단all'
+data_dir = '/data2/wkuData/가을문단all'
 prefix = '가을문단all/'
 
-data_folder = '../Data/'
+data_folder = '/data2/wkuData/'
 issues = []
 
 new_files = []
 for i, data in enumerate(files):
     
-    new_file = os.path.join(data_dir, data+'_가을문단all.wav')    
+    new_file = os.path.join(data_dir, data+'_가을문단all.wav')
+        
     save_file = os.path.join(prefix, data+'_가을문단all.wav')
 
 
-    if not os.path.isfile(os.path.join(data_folder, new_file)):
+    if not os.path.isfile(new_file):
         issues.append(data)
     else:
         new_files.append(save_file)
 print('# of no mapping data: ', len(issues))
+
 
 remove_indices = df[df['연구번호'].isin(issues)].index.tolist()
 print(remove_indices)
@@ -39,15 +43,22 @@ print(len(df_cleaned))
 
 # 최종 mapping 된 데이터 요소들
 files = df['연구번호'].values.tolist()
-genders = df['Sex'].values.tolist()
-ages = df['Age'].values.tolist()
-mss = df['MS'].values.tolist()
-phq_bs = df['PHQ9_B'].values.tolist()
-phq_totals = df['PHQ총점_B'].values.tolist()
-phq_severities = df['PHQ중증도번호_B'].values.tolist()
+df_cleaned['연구번호'] = new_files
+#print(len(new_files))
+#print(len(files))
+
+genders = df_cleaned['Sex'].values.tolist()
+ages = df_cleaned['Age'].values.tolist()
+mss = df_cleaned['MS'].values.tolist()
+phq_bs = df_cleaned['PHQ9_B'].values.tolist()
+phq_totals = df_cleaned['PHQ총점_B'].values.tolist()
+phq_severities = df_cleaned['PHQ중증도번호_B'].values.tolist()
 
 columns = ['연구번호', 'Sex', 'Age', 'MS', 'PHQ9_B', 'PHQ총점_B', 'PHQ중증도번호_B']
-df = df[columns]
+df = df_cleaned[columns]
+print(len(df))
+
+print('파일', len(df_cleaned['연구번호'].values.tolist()))
 
 # Train/Test Split
 train_df, test_df = train_test_split(
