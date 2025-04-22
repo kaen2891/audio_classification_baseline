@@ -149,18 +149,19 @@ def set_loader(args):
 
 
 def set_model(args):
-    from transformers import Wav2Vec2Model, HubertModel, WavLMModel, AutoFeatureExtractor
+    from transformers import Wav2Vec2Model, HubertModel, WavLMModel, AutoFeatureExtractor, Wav2Vec2Processor
     from models.speech import PretrainedSpeechModels
     
     if args.model == 'facebook/hubert-base-ls960': #hubert-based models
         speech_extractor = HubertModel
-        model = PretrainedSpeechModels(speech_extractor, args.model, 768)
+        model = PretrainedSpeechModels(speech_extractor, args.model, 768, 3)
     elif args.model == 'facebook/wav2vec2-base': #wav2vec2-based models
         speech_extractor = Wav2Vec2Model
-        model = PretrainedSpeechModels(speech_extractor, args.model, 768)
+        args.processor = Wav2Vec2Processor.from_pretrained('facebook/wav2vec2-base')
+        model = PretrainedSpeechModels(speech_extractor, args.model, 768, 3)
     elif args.model == 'microsoft/wavlm-base-plus': #wavlm-based models
         speech_extractor = WavLMModel
-        model = PretrainedSpeechModels(speech_extractor, args.model, 768)
+        model = PretrainedSpeechModels(speech_extractor, args.model, 768, 3)
     
     classifier = nn.Linear(model.final_feat_dim, args.n_cls) if args.model not in ['ast'] else deepcopy(model.mlp_head)
     
