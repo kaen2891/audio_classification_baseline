@@ -155,7 +155,9 @@ def save_model(model, optimizer, args, epoch, save_file, classifier):
     
     
 def update_json(exp_name, acc, path='./save/results.json'):
-    acc = [round(a, 2) for a in acc]
+    #acc = [round(a, 2) for a in acc]
+    #acc = round(acc[0], 2)
+    acc = round(list(acc.values())[0].item(), 2)
     if not os.path.exists(path):
         with open(path, 'w') as f:
             json.dump({}, f)
