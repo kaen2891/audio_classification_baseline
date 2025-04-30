@@ -18,23 +18,23 @@ import torch.optim as optim
 import torch.backends.cudnn as cudnn
 from torchvision import transforms
 
-from util.emo_dataset import EmoDataset, EmoCREMADataset
+from util.dataset import DepressedDataset, AugDepressedDataset
 from util.misc import adjust_learning_rate, warmup_learning_rate, set_optimizer, update_moving_average
 from util.misc import AverageMeter, accuracy, save_model, update_json
-from util.augmentation import SpecAugment
-from models import get_backbone_class
-
-from pytorch_metric_learning import losses, miners, samplers, testers, trainers
+from transformers import WhisperProcessor, WhisperModel, WhisperForConditionalGeneration
+from torch.nn.utils.rnn import pad_sequence
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 def parse_args():
     parser = argparse.ArgumentParser('argument for supervised training')
 
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--dataset_seed', type=int, default=0)
-    parser.add_argument('--print_freq', type=int, default=10)
+    parser.add_argument('--print_freq', type=int, default=100)
     parser.add_argument('--save_freq', type=int, default=100)
     parser.add_argument('--save_dir', type=str, default='./save') 
     parser.add_argument('--tag', type=str, default='',
@@ -46,11 +46,11 @@ def parse_args():
     
     # optimization
     parser.add_argument('--optimizer', type=str, default='adam')
-    parser.add_argument('--epochs', type=int, default=200)
-    parser.add_argument('--learning_rate', type=float, default=1e-3)
+    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--learning_rate', type=float, default=5e-5)
     parser.add_argument('--lr_decay_epochs', type=str, default='120,160')
     parser.add_argument('--lr_decay_rate', type=float, default=0.1)
-    parser.add_argument('--weight_decay', type=float, default=1e-4)
+    parser.add_argument('--weight_decay', type=float, default=1e-6)
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--cosine', action='store_true',
                         help='using cosine annealing')
@@ -58,61 +58,43 @@ def parse_args():
                         help='warm-up for large batch training')
     parser.add_argument('--warm_epochs', type=int, default=0,
                         help='warmup epochs')
-    parser.add_argument('--weighted_loss', action='store_true',
-                        help='weighted cross entropy loss (higher weights on abnormal class)')
     # dataset
-    parser.add_argument('--dataset', type=str, default='tess')
-    parser.add_argument('--data_folder', type=str, default='./data/')
-    parser.add_argument('--train_annotation_file', type=str, default='./data/OAF_train_data.csv')
-    parser.add_argument('--test_annotation_file', type=str, default='./data/OAF_test_data.csv')
-    parser.add_argument('--batch_size', type=int, default=128)
+    parser.add_argument('--dataset', type=str, default='autumn')
+    parser.add_argument('--data_folder', type=str, default='../Data/')    
+    parser.add_argument('--batch_size', type=int, default=4)
     parser.add_argument('--num_workers', type=int, default=8)
-    # icbhi dataset
-    parser.add_argument('--class_split', type=str, default='emo',
-                        help='emo: (neutral, happy, surprised, angry, fear, disgust, sad)')
-    parser.add_argument('--n_cls', type=int, default=0,
+    
+    parser.add_argument('--n_cls', type=int, default=2,
                         help='set k-way classification problem for class')
     parser.add_argument('--sample_rate', type=int,  default=16000, 
                         help='sampling rate when load audio data, and it denotes the number of samples per one second')
-    parser.add_argument('--desired_length', type=int,  default=6, 
-                        help='fixed length size of individual cycle')
-    parser.add_argument('--n_mels', type=int, default=128,
-                        help='the number of mel filter banks')
-    parser.add_argument('--pad_types', type=str,  default='repeat', 
-                        help='zero: zero-padding, repeat: padding with duplicated samples, aug: padding with augmented samples')
-    parser.add_argument('--resz', type=float, default=1, 
-                        help='resize the scale of mel-spectrogram')
-    parser.add_argument('--raw_augment', type=int, default=0, 
-                        help='control how many number of augmented raw audio samples')
-    parser.add_argument('--specaug_policy', type=str, default='icbhi_ast_sup',  ### check
-                        help='policy (argument values) for SpecAugment')
-    parser.add_argument('--specaug_mask', type=str, default='mean', 
-                        help='specaug mask value', choices=['mean', 'zero'])
+    parser.add_argument('--train_annotation_file', type=str, default='train.csv')
+    parser.add_argument('--test_annotation_file', type=str, default='test.csv')
+    parser.add_argument('--weighted_loss', action='store_true',
+                        help='weighted cross entropy loss (higher weights on abnormal class)')
+    
 
     # model
-    parser.add_argument('--model', type=str, default='resnet18')
+    parser.add_argument('--model', type=str, default='facebook/wav2vec2-base')
     parser.add_argument('--pretrained', action='store_true')
     parser.add_argument('--framework', type=str, default='transformers', 
-                        help='using pretrained speech models from s3prl or huggingface', choices=['s3prl', 'transformers'])
+                        help='using pretrained speech models from s3prl or huggingface', choices=['transformers'])
     
     parser.add_argument('--pretrained_ckpt', type=str, default=None,
                         help='path to pre-trained encoder model')
-    parser.add_argument('--from_sl_official', action='store_true',
-                        help='load from supervised imagenet-pretrained model (official PyTorch)')
     parser.add_argument('--ma_update', action='store_true',
                         help='whether to use moving average update for model')
-    parser.add_argument('--ma_beta', type=float, default=0,
+    parser.add_argument('--ma_beta', type=float, default=0.5,
                         help='moving average value')
-    parser.add_argument('--audioset_pretrained', action='store_true',
-                        help='load from imagenet- and audioset-pretrained model')
     parser.add_argument('--method', type=str, default='ce')
     
+    parser.add_argument('--augment', action='store_true')
+    parser.add_argument('--T', type=int, default=5, help='len of waveform')
+    parser.add_argument('--overlap', type=float, default=0.5, help='overlap for each segment')
+    parser.add_argument('--num_lstm', type=int, default=1, help='# of lstm layers')
     
-    parser.add_argument('--channel', type=int, default=0, choices=[0, 1, 2, 3, 4, 5, 6, 7])
-    parser.add_argument('--mic', type=str, default='original', choices=['original', 'mems', 'gpas'])
-    parser.add_argument('--test_origin', action='store_true',
-                        help='set the test samples as original mic')
-    
+    parser.add_argument('--domain', type=str, default='gender', choices=['gender', 'age'])
+    parser.add_argument('--domain_adaptation', action='store_true')
     args = parser.parse_args()
 
     iterations = args.lr_decay_epochs.split(',')
@@ -122,10 +104,19 @@ def parse_args():
     args.model_name = '{}_{}_{}'.format(args.dataset, args.model, args.method)
     if args.tag:
         args.model_name += '_{}'.format(args.tag)
-    args.save_folder = os.path.join(args.save_dir, args.model_name)
+    
+    if args.domain_adaptation:
+        args.save_folder = os.path.join(args.save_dir, 'da', args.model_name)
+    else:
+        args.save_folder = os.path.join(args.save_dir, args.model_name)
+    
     if not os.path.isdir(args.save_folder):
         os.makedirs(args.save_folder)
 
+    if args.domain_adaptation:
+        args.save_folder = os.path.join(args.save_dir, 'da', args.model_name)
+        args.m_cls = 2
+    
     if args.warm:
         args.warmup_from = args.learning_rate * 0.1
         args.warm_epochs = 10
@@ -135,81 +126,73 @@ def parse_args():
                     1 + math.cos(math.pi * args.warm_epochs / args.epochs)) / 2
         else:
             args.warmup_to = args.learning_rate
-    if args.dataset == 'tess':
-        if args.class_split == 'emo':  
-            if args.n_cls == 7:
-                args.cls_list = ['neutral', 'happy', 'surprised', 'angry', 'fear', 'disgust', 'sad']
-            else:
-                raise NotImplementedError
-    elif args.dataset == 'crema':
-        if args.class_split == 'emo':  
-            if args.n_cls == 6:
-                args.cls_list = ['neutral', 'happy', 'angry', 'fear', 'disgust', 'sad']
-            else:
-                raise NotImplementedError
+    
+    if args.dataset == 'autumn':
+        if args.n_cls == 2:
+            args.cls_list = ['Normal', 'Suicidal']
+        else:
+            raise NotImplementedError
 
     return args
 
 
+def collate_fn(batch):
+    input_features, labels, genders, ages = zip(*batch)    
+    input_features_padded = pad_sequence(input_features, batch_first=True, padding_value=0.0)
+
+    return input_features_padded, labels, genders, ages
+
 def set_loader(args):
-    if args.dataset in ['tess', 'crema']:
-        
-        args.h, args.w = 598, 128
-        
-        train_transform = [transforms.ToTensor(),
-                            SpecAugment(args),
-                            transforms.Resize(size=(int(args.h * args.resz), int(args.w * args.resz)))]
-        val_transform = [transforms.ToTensor(),
-                        transforms.Resize(size=(int(args.h * args.resz), int(args.w * args.resz)))]
-        train_transform = transforms.Compose(train_transform)
-        val_transform = transforms.Compose(val_transform)
-        
-        if args.dataset == 'tess':
-            train_dataset = EmoDataset(train_flag=True, transform=None if args.model in ['facebook/wav2vec2-base', 'facebook/hubert-base-ls960', 'microsoft/wavlm-base-plus'] else train_transform, args=args, print_flag=True)
-            val_dataset = EmoDataset(train_flag=False, transform=None if args.model in ['facebook/wav2vec2-base', 'facebook/hubert-base-ls960', 'microsoft/wavlm-base-plus'] else val_transform, args=args, print_flag=True)
-        else:
-            train_dataset = EmoCREMADataset(train_flag=True, transform=None if args.model in ['facebook/wav2vec2-base', 'facebook/hubert-base-ls960', 'microsoft/wavlm-base-plus'] else train_transform, args=args, print_flag=True)
-            val_dataset = EmoCREMADataset(train_flag=False, transform=None if args.model in ['facebook/wav2vec2-base', 'facebook/hubert-base-ls960', 'microsoft/wavlm-base-plus'] else val_transform, args=args, print_flag=True)
-        args.class_nums = train_dataset.class_nums
+    if args.augment:
+        train_dataset = AugDepressedDataset(train_flag=True, transform=None, args=args, print_flag=True)
     else:
-        raise NotImplemented
+        train_dataset = DepressedDataset(train_flag=True, transform=None, args=args, print_flag=True)
+    test_dataset = DepressedDataset(train_flag=False, transform=None, args=args, print_flag=True)
+    
+    args.class_nums = train_dataset.class_nums
+    
+    #print('class_nums', args.class_nums)
+    
     
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
-                                               num_workers=args.num_workers, pin_memory=True, drop_last=True)
+                                               num_workers=args.num_workers, pin_memory=True, drop_last=True, collate_fn=collate_fn)
     
-    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
-                                             num_workers=args.num_workers, pin_memory=True)
+    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False,
+                                             num_workers=args.num_workers, pin_memory=True, collate_fn=collate_fn)
     
-    return train_loader, val_loader, args
+    return train_loader, test_loader, args
     
 
+
 def set_model(args):
-    from transformers import Wav2Vec2Model, HubertModel, WavLMModel, AutoFeatureExtractor
-    from models.speech import PretrainedSpeechModels    
-    kwargs = {}
-    if args.model == 'ast':
-        kwargs['input_fdim'] = int(args.h * args.resz)
-        kwargs['input_tdim'] = int(args.w * args.resz)
-        kwargs['label_dim'] = args.n_cls
-        kwargs['imagenet_pretrain'] = args.from_sl_official
-        kwargs['audioset_pretrain'] = args.audioset_pretrained
-        model = get_backbone_class(args.model)(**kwargs)
+    from transformers import Wav2Vec2Model, HubertModel, WavLMModel, AutoFeatureExtractor, Wav2Vec2Processor
+    from models.speech import PretrainedSpeechModels
     
-    elif args.model in ['resnet18', 'cnn6', 'efficientnet_b0']:        
-        model = get_backbone_class(args.model)(**kwargs)
-        
+    if args.model == 'facebook/wav2vec2-base': #wav2vec2-based models
+        speech_extractor = Wav2Vec2Model
+        args.processor = AutoFeatureExtractor.from_pretrained('facebook/wav2vec2-base')
+        model = PretrainedSpeechModels(speech_extractor, args.model, 768, args.num_lstm)
+    
     elif args.model == 'facebook/hubert-base-ls960': #hubert-based models
         speech_extractor = HubertModel
-        model = PretrainedSpeechModels(speech_extractor, args.model, 768)
-    elif args.model == 'facebook/wav2vec2-base': #wav2vec2-based models
-        speech_extractor = Wav2Vec2Model
-        model = PretrainedSpeechModels(speech_extractor, args.model, 768)
+        args.processor = AutoFeatureExtractor.from_pretrained('facebook/hubert-base-ls960')        
+        model = PretrainedSpeechModels(speech_extractor, args.model, 768, args.num_lstm)
+    
     elif args.model == 'microsoft/wavlm-base-plus': #wavlm-based models
         speech_extractor = WavLMModel
-        model = PretrainedSpeechModels(speech_extractor, args.model, 768)
+        args.processor = AutoFeatureExtractor.from_pretrained('microsoft/wavlm-base-plus')        
+        model = PretrainedSpeechModels(speech_extractor, args.model, 768, args.num_lstm)
     
-    classifier = nn.Linear(model.final_feat_dim, args.n_cls) if args.model not in ['ast'] else deepcopy(model.mlp_head)
+    if args.domain_adaptation:
+        class_classifier = nn.Linear(model.final_feat_dim, args.n_cls) if args.model not in ['ast'] else deepcopy(model.mlp_head)
+        domain_classifier = nn.Linear(model.final_feat_dim, args.m_cls) if args.model not in ['ast'] else deepcopy(model.domain_mlp_head)
+    else:
+        classifier = nn.Linear(model.final_feat_dim, args.n_cls) if args.model not in ['ast'] else deepcopy(model.mlp_head)
     
+    criterion = nn.CrossEntropyLoss()
+    if args.domain_adaptation:
+        criterion2 = nn.CrossEntropyLoss()
+    '''
     if not args.weighted_loss:
         weights = None
         criterion = nn.CrossEntropyLoss()
@@ -219,6 +202,7 @@ def set_model(args):
         weights /= weights.sum()
         
         criterion = nn.CrossEntropyLoss(weight=weights)
+    '''
     
     if args.model not in ['ast', 'facebook/wav2vec2-base', 'facebook/hubert-base-ls960', 'microsoft/wavlm-base-plus'] and args.from_sl_official:
         model.load_sl_official_weights()
@@ -246,15 +230,26 @@ def set_model(args):
         print('pretrained model loaded from: {}'.format(args.pretrained_ckpt))
     
     if args.method == 'ce':
-        criterion = [criterion.cuda()]
+        if args.domain_adaptation:
+            criterion = [criterion.cuda(), criterion2.cuda()]
+        else:
+            criterion = [criterion.cuda()]    
+    
     
     if torch.cuda.device_count() > 1:
         model = torch.nn.DataParallel(model)
         
     model.cuda()
-    classifier.cuda()
+    if args.domain_adaptation:
+        classifier = [class_classifier.cuda(), domain_classifier.cuda()]
+    else:
+        classifier.cuda()
     
-    optim_params = list(model.parameters()) + list(classifier.parameters())
+    if args.domain_adaptation:
+        optim_params = list(model.parameters()) + list(classifier[0].parameters()) + list(classifier[-1].parameters())
+    else:
+        optim_params = list(model.parameters()) + list(classifier.parameters())
+    
     optimizer = set_optimizer(args, optim_params)
     
     return model, classifier, criterion, optimizer
@@ -262,7 +257,15 @@ def set_model(args):
 
 def train(train_loader, model, classifier, criterion, optimizer, epoch, args, scaler=None):
     model.train()
-    classifier.train()
+    if args.domain_adaptation:
+        domain_classifier = classifier[1]
+        domain_classifier.train()
+        classifier = classifier[0]
+        classifier.train()
+    else:
+        classifier.train()
+    
+    #print('in training')        
     
     batch_time = AverageMeter()
     data_time = AverageMeter()
@@ -270,34 +273,68 @@ def train(train_loader, model, classifier, criterion, optimizer, epoch, args, sc
     top1 = AverageMeter()
 
     end = time.time()
-    for idx, (images, labels) in enumerate(train_loader):
-        # data load
+    for idx, (images, labels, genders, ages) in enumerate(train_loader):
         data_time.update(time.time() - end)
         images = images.cuda(non_blocking=True)
-        labels = labels.cuda(non_blocking=True)
+        labels = torch.stack(labels).cuda(non_blocking=True)
+        genders = torch.stack(genders).cuda(non_blocking=True)
+        ages = torch.stack(ages).cuda(non_blocking=True)
         bsz = labels.shape[0]
         
+        if args.domain_adaptation:
+            if args.domain == 'gender':
+                domain_labels = genders
+            elif args.domain == 'age':
+                domain_labels = ages
+                                
         if args.ma_update:
             # store the previous iter checkpoint
             with torch.no_grad():
-                ma_ckpt = [deepcopy(model.state_dict()), deepcopy(classifier.state_dict())]
-                alpha = None
-
+                if args.domain_adaptation:
+                    ma_ckpt = [deepcopy(model.state_dict()), deepcopy(classifier.state_dict()), deepcopy(domain_classifier.state_dict())]
+                    p = float(idx + epoch * len(train_loader)) / args.epochs + 1 / len(train_loader)
+                    alpha = 2. / (1. + np.exp(-10 * p)) - 1
+                else:
+                    ma_ckpt = [deepcopy(model.state_dict()), deepcopy(classifier.state_dict())]
+                    alpha = None
+                
         warmup_learning_rate(args, epoch, idx, len(train_loader), optimizer)
 
         with torch.cuda.amp.autocast():
             if args.method == 'ce':
                 if args.model in ['facebook/hubert-base-ls960', 'facebook/wav2vec2-base', 'microsoft/wavlm-base-plus']:
-                    images = torch.squeeze(images, 1)
+                    images = torch.squeeze(images, 1)        
                     features = model(images, args=args, alpha=alpha, training=True)
+                    #print('features', features.size())
+                    
+                    if args.domain_adaptation:
+                        #features = (features, domain_features) # domain_features -> ReverseLayerF                    
+                        #print('label', labels)
+                        output = classifier(features)
+                        class_loss = criterion[0](output, labels)
+                        #print('output {} labels {}'.format(output.size(), labels.size()))
+                                       
+                        domain_output = ReverseLayerF.apply(features, alpha)
+                        domain_output = domain_classifier(domain_output)
+                        #print('domain_output {} domain_labels {}'.format(domain_output.size(), domain_labels.size()))
+                        #print('domain_labels', domain_labels)                        
+                        domain_loss = criterion[1](domain_output, domain_labels)
+                                                
+                        loss = class_loss +  domain_loss
+                    else:
+                        output = classifier(features)
+                        #print('output', output.size())
+                        #print('labels', labels)
+                        loss = criterion[0](output, labels)
+                        
+                    
                 else:
                     images = torch.squeeze(images, 1)
                     images = images.permute(0, 3, 1, 2)
                     features = model(args.transforms(images), args=args, alpha=alpha, training=True)
-                        
-                output = classifier(features)
-                loss = criterion[0](output, labels)
-
+                    output = classifier(features)
+                    loss = criterion[0](output, labels)
+                    
         losses.update(loss.item(), bsz)
         [acc1], _ = accuracy(output[:bsz], labels, topk=(1,))
         top1.update(acc1[0], bsz)
@@ -316,6 +353,8 @@ def train(train_loader, model, classifier, criterion, optimizer, epoch, args, sc
                 # exponential moving average update
                 model = update_moving_average(args.ma_beta, model, ma_ckpt[0])
                 classifier = update_moving_average(args.ma_beta, classifier, ma_ckpt[1])
+                if args.domain_adaptation:
+                    domain_classifier = update_moving_average(args.ma_beta, domain_classifier, ma_ckpt[1])
 
         # print info
         if (idx + 1) % args.print_freq == 0:
@@ -331,42 +370,27 @@ def train(train_loader, model, classifier, criterion, optimizer, epoch, args, sc
     return losses.avg, float(top1.avg)
 
 
-def plot_losses(losses, name, args):
-    epochs = range(1, len(losses) + 1)
-    
-    plt.figure(figsize=(12, 4))
-    
-    plt.plot(epochs, losses, label="Loss")
-    plt.xlabel("Epochs")
-    plt.ylabel("Loss")
-    plt.legend()
-    plt.title("Loss over Epochs")
-    
-    plt.savefig(os.path.join(args.save_folder, name))
-    plt.cla()
-    plt.clf()
+from torch.autograd import Function
+class ReverseLayerF(Function):
 
-def plot_metrics(acc, name, args):
-    epochs = range(1, len(acc) + 1)
-    
-    plt.figure(figsize=(12, 4))
-    
-    plt.plot(epochs, acc, label="Accuracy")
-    plt.xlabel("Epochs")
-    plt.ylabel("Accuracy")
-    plt.legend()
-    plt.title("Accuracy over Epochs")
-    
-    plt.savefig(os.path.join(args.save_folder, name))
-    plt.cla()
-    plt.clf()
+    @staticmethod
+    def forward(ctx, x, alpha):
+        ctx.alpha = alpha
 
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        output = grad_output.neg() * ctx.alpha
+
+        return output, None
 
 from sklearn.metrics import accuracy_score, f1_score
-
 def validate(val_loader, model, classifier, criterion, args, best_acc, best_model=None):
     save_bool = False
     model.eval()
+    if args.domain_adaptation:
+        classifier = classifier[0]
     classifier.eval()
 
     batch_time = AverageMeter()
@@ -379,9 +403,11 @@ def validate(val_loader, model, classifier, criterion, args, best_acc, best_mode
 
     with torch.no_grad():
         end = time.time()
-        for idx, (images, labels) in enumerate(val_loader):
+        for idx, (images, labels, genders, ages) in enumerate(val_loader):
             images = images.cuda(non_blocking=True)
-            labels = labels.cuda(non_blocking=True)
+            labels = torch.stack(labels).cuda(non_blocking=True)
+            #genders = torch.stack(genders).cuda(non_blocking=True)
+            #ages = torch.stack(ages).cuda(non_blocking=True)
             bsz = labels.shape[0]
             
 
@@ -435,6 +461,22 @@ def validate(val_loader, model, classifier, criterion, args, best_acc, best_mode
     return best_acc, best_model, save_bool, losses.avg, acc
 
 
+def plot_metrics(acc, name, args):
+    epochs = range(1, len(acc) + 1)
+    
+    plt.figure(figsize=(12, 4))
+    
+    plt.plot(epochs, acc, label="Accuracy")
+    plt.xlabel("Epochs")
+    plt.ylabel("Accuracy")
+    plt.legend()
+    plt.title("Accuracy over Epochs")
+    
+    plt.savefig(os.path.join(args.save_folder, name))
+    plt.cla()
+    plt.clf()
+
+
 def main():
     args = parse_args()
     with open(os.path.join(args.save_folder, 'train_args.json'), 'w') as f:
@@ -451,16 +493,26 @@ def main():
     cudnn.benchmark = True
     
     best_model = None
-    if args.dataset in ['tess', 'crema']:
-        best_acc = [0]  # Accuracy
     
-    args.transforms = SpecAugment(args)
+    best_acc = [0]
     
-    train_loader, val_loader, args = set_loader(args)
     model, classifier, criterion, optimizer = set_model(args)
-    print('model', model)
     print('# of params', sum(p.numel() for p in model.parameters() if p.requires_grad))
-
+    
+    train_loader, test_loader, args = set_loader(args)
+    
+    if args.weighted_loss:
+        #weighted_loss is used only for imbalanced setting
+        weights = torch.tensor(args.class_nums, dtype=torch.float32)
+        weights = 1.0 / (weights / weights.sum())
+        weights /= weights.sum() 
+        
+        new_criterion = nn.CrossEntropyLoss(weight=weights)
+        criterion[0] = new_criterion.cuda()
+        #criterion = [criterion.cuda()]
+    
+    print('# of train_loader {} test_loader {}'.format(len(train_loader), len(test_loader)))
+    
     if args.resume:
         if os.path.isfile(args.resume):
             print("=> loading checkpoint '{}'".format(args.resume))
@@ -480,16 +532,15 @@ def main():
     
     print('*' * 20)
     
-    train_losses = []
-    #dev_losses = []
-    test_losses = []
-    
-    train_accs = []
-    test_accs = []
+    total_loss = 0.0
      
     if not args.eval:
         print('Experiments {} start'.format(args.model_name))
         print('Training for {} epochs on {} dataset'.format(args.epochs, args.dataset))
+        
+        train_losses = []
+        test_losses = []
+        test_accs = []
         
         for epoch in range(args.start_epoch, args.epochs+1):
             adjust_learning_rate(args, optimizer, epoch)
@@ -497,53 +548,39 @@ def main():
             # train for one epoch
             time1 = time.time()
             
-            train_loss, train_acc = train(train_loader, model, classifier, criterion, optimizer, epoch, args, scaler)
+            loss, _ = train(train_loader, model, classifier, criterion, optimizer, epoch, args, scaler)
             time2 = time.time()
-            print('Train epoch {}, total time {:.2f}, accuracy:{:.2f}'.format(epoch, time2-time1, train_acc))
+            print('Train epoch {}, total time {:.2f}, Loss {:.2f}'.format(epoch, time2-time1, loss))
             
             # eval for one epoch
-            best_acc, best_model, save_bool, val_loss, val_acc = validate(val_loader, model, classifier, criterion, args, best_acc, best_model)
-            # save a checkpoint of model and classifier when the best score is updated
-            if save_bool:            
-                save_file = os.path.join(args.save_folder, 'best_epoch_{}.pth'.format(epoch))
-                print('Best ckpt is modified with Acc = {:.2f} when Epoch = {}'.format(best_acc[0], epoch))
-                save_model(model, optimizer, args, epoch, save_file, classifier)
-                
-            if epoch % args.save_freq == 0:
-                save_file = os.path.join(args.save_folder, 'epoch_{}.pth'.format(epoch))
-                save_model(model, optimizer, args, epoch, save_file, classifier)
             
-            train_losses.append(train_loss)
-            test_losses.append(val_loss)
+            best_acc, best_model, save_bool, test_loss, _ = validate(test_loader, model, classifier, criterion, args, best_acc, best_model)
+            print('Test Acc = {}'.format(best_acc[0]))
+                                    
+            train_losses.append(loss)
+            test_losses.append(test_loss)
+            test_accs.append(best_acc[0])
             
-            train_accs.append(train_acc)
-            test_accs.append(val_acc)
-
-        # save a checkpoint of classifier with the best accuracy or score
-        save_file = os.path.join(args.save_folder, 'best.pth')
-        model.load_state_dict(best_model[0])
-        classifier.load_state_dict(best_model[1])
-        save_model(model, optimizer, args, epoch, save_file, classifier)
-        
-        
-        plot_losses(train_losses, 'train.png', args)
+        plot_metrics(train_losses, 'train.png', args)
         np.save(os.path.join(args.save_folder, 'train_losses'), train_losses)
-                
-        plot_losses(test_losses, 'test.png', args)
-        np.save(os.path.join(args.save_folder, 'test_losses'), test_losses)
         
-        plot_metrics(train_accs, 'train_acc.png', args)
-        np.save(os.path.join(args.save_folder, 'train_accs'), train_accs)
-                
+        plot_metrics(test_losses, 'test.png', args)
+        np.save(os.path.join(args.save_folder, 'test_losses'), test_losses)
+
         plot_metrics(test_accs, 'test_acc.png', args)
         np.save(os.path.join(args.save_folder, 'test_accs'), test_accs)
-        
+
+        # save a checkpoint of classifier with the best accuracy or score
+        save_file = os.path.join(args.save_folder, 'best_test.pth')
+        model.load_state_dict(best_model[0])
+        classifier[0].load_state_dict(best_model[1]) if args.domain_adaptation else classifier.load_state_dict(best_model[1])
+        save_model(model, optimizer, args, epoch, save_file, classifier[0] if args.domain_adaptation else classifier)
     else:
         print('Testing the pretrained checkpoint on {} dataset'.format(args.dataset))
-        best_acc, _, _  = validate(val_loader, model, classifier, criterion, args, best_acc)
+        best_acc, _, _  = validate(test_loader, model, criterion, args, best_acc)
     
     print('{} finished'.format(args.model_name))
-    update_json('%s' % args.model_name, best_acc, path=os.path.join(args.save_dir, 'results.json'))
+    update_json('%s' % args.model_name, best_model, path=os.path.join(args.save_dir, 'results.json'))
     
 if __name__ == '__main__':
     main()
