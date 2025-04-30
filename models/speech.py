@@ -22,38 +22,62 @@ class PretrainedSpeechModels(nn.Module): # using pretrained speech models from h
         self.LSTM = nn.LSTM(self.final_feat_dim, self.final_feat_dim, self.num_lstm, batch_first=True, bidirectional=False) # num_layer=3
         
     def forward(self, x, y=None, y2=None, da_index=None, patch_mix=False, time_domain=False, args=None, alpha=None, training=False):
-        print('input x', x.size())
-        
-        args.T = 500
+        #print('input x', x.size())
+
+        T = int(args.T * args.sample_rate)
         total_frames = x.size(1)
-        num_chunks = total_frames // T
         
-        print('total_frames {} num_chunks {}'.format(total_frames, num_chunks))
-                
+        # overlap ratio (e.g., 0.5 = 50% overlap)
+        overlap = args.overlap
+        stride = int(T * overlap)
+        
+        # calculate num_chunks based on stride
+        num_chunks = (total_frames - T) // stride + 1
+        
+        #print('input x', x.size())
+        #print('total_frames {} T {} stride {}'.format(total_frames, T, stride))
+        #print('num_chunks', num_chunks)
+        
         outputs = []
         
         for i in range(num_chunks):
-            start = i * T
-            end = start + T
-            x_chunk = x[:, start:end, :] # 8, T, 768
+            start = int(i * stride)
+            end = int(start + T)
+            #print('start {} end {}'.format(start, end))
             
-            out_chunk = self.feature_extractors(x_chunk) # 8, 100, 768
+            if start >= total_frames:
+                break
+        
+            if end > total_frames:
+                x_chunk = x[:, start:total_frames]  # (8, remained_length)
+                pad_length = end - total_frames
+                #print(f"Padding {pad_length} frames")
+        
+                # Pad: (batch, time)
+                x_chunk = F.pad(x_chunk, (0, 0, 0, pad_length))  # (left, right, top, bottom)
+                # shape : (8, T)
+            else:
+                x_chunk = x[:, start:end]  # (8, T)
             
-            pooled_chunk = out_chunk["last_hidden_state"].mean(dim=1)
+        
+            if end > total_frames:
+                
+                break
+        
+            x_chunk = x[:, start:end]  # (8, T)
+            #print('{}th start {} end {} x_chunk {}'.format(i, start, end, x_chunk.size()))
+            
+            out_chunk = self.feature_extractors(x_chunk)  # (8, 100, 768)
+            
+            pooled_chunk = out_chunk["last_hidden_state"].mean(dim=1)  # (8, 768)
+            #print('{}th pooled_chunk {}'.format(i, pooled_chunk.size()))
             
             outputs.append(pooled_chunk)
-        
-        final_output = torch.stack(outputs, dim=1)
+        final_output = torch.stack(outputs, dim=1) # Batch, num_chunks, 768
+        #print('final_output', final_output.size())
         
         output, (h_n, c_n) = self.LSTM(final_output)
         output = output[:, -1, :]
-        print('output', output.size())
-        exit()
+        #print('output', output.size()) # Batch, 768
         return output
         
-        iter_num = spec_length // hop_num
-        
-        
-        x = self.feature_extractors(x)
-        x = x["last_hidden_state"].mean(dim=1)
-        return x  
